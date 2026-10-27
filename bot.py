@@ -16,7 +16,7 @@ log = logging.getLogger("pollbot")
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 POLL_CHANNEL_ID = int(os.getenv("POLL_CHANNEL_ID", "0"))
-DB_PATH = os.getenv("DB_PATH", "data/votes.db")
+DB_PATH = os.getenv("DB_PATH", "/tmp/votes.db")
 
 # ── database ──────────────────────────────────────────────────────────────────
 
@@ -156,12 +156,6 @@ class PollBot(commands.Bot):
         intents = discord.Intents.default()
         super().__init__(command_prefix="!", intents=intents)
         self.add_view(PollView())
-
-    async def setup_hook(self):
-        if GUILD_ID:
-            guild = discord.Object(id=GUILD_ID)
-            self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
 
     async def on_ready(self):
         log.info("Logged in as %s (%s)", self.user, self.user.id)
