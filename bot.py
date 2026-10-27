@@ -49,7 +49,6 @@ def get_counts():
     return rows.get("Alliance", 0), rows.get("Horde", 0)
 
 def upsert_vote(user_id: int, faction: str) -> str | None:
-    """Returns 'same' if unchanged, old faction str if switched, None if new."""
     cur = db.execute("SELECT faction FROM votes WHERE user_id = ?", (user_id,))
     row = cur.fetchone()
     old = row[0] if row else None
@@ -168,9 +167,16 @@ class PollBot(commands.Bot):
         await self._ensure_poll()
 
     async def _ensure_poll(self):
-        channel = self.get_channel(POLL_CHANNEL_ID)
-        if not channel:
-            log.warning("POLL_CHANNEL_ID %s not found", POLL_CHANNEL_ID)
+        try:
+            channel = await self.fetch_channel(POLL_CHANNEL_ID)
+        except discord.NotFound:
+            log.error("Channel %s not found", POLL_CHANNEL_ID)
+            return
+        except discord.Forbidden:
+            log.error("No permission to access channel %s", POLL_CHANNEL_ID)
+            return
+        except Exception as e:
+            log.error("Could not fetch channel: %s", e)
             return
 
         row = load_poll_meta()
