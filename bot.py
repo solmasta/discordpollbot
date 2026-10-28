@@ -124,12 +124,14 @@ class PollView(discord.ui.View):
             )
             return
         alliance, horde = get_counts()
-        await interaction.message.edit(embed=build_embed(alliance, horde), view=self)
+        # Acknowledge within Discord's 3s window by editing the poll message
+        # via the interaction itself (no channel permissions needed).
+        await interaction.response.edit_message(embed=build_embed(alliance, horde), view=self)
         if result is None:
             reply = f"You voted **{faction}**! ✅"
         else:
             reply = f"Switched from **{result}** → **{faction}**! ✅"
-        await interaction.response.send_message(reply, ephemeral=True)
+        await interaction.followup.send(reply, ephemeral=True)
         log.info("Vote: %s → %s (A=%d H=%d)", interaction.user, faction, alliance, horde)
 
     @discord.ui.button(
@@ -154,6 +156,8 @@ class PollBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         super().__init__(command_prefix="!", intents=intents)
+
+    async def setup_hook(self):
         self.add_view(PollView())
 
     async def on_ready(self):
