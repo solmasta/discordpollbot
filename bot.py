@@ -2,6 +2,7 @@ import os
 import sqlite3
 import asyncio
 import logging
+import aiohttp
 import discord
 from discord.ext import commands
 from aiohttp import web
@@ -192,7 +193,24 @@ class PollBot(commands.Bot):
                 log.info("Poll refreshed (msg=%s)", row[0])
                 return
             except discord.NotFound:
-                log.warning("Saved poll message missing — reposting")
+                log.warning("Saved poll message missing — looking for existing poll")
+
+        # Database may have been wiped (e.g. ephemeral disk) — reuse the bot's
+        # existing poll message instead of posting a duplicate.
+        try:
+            async for old in channel.history(limit=50):
+                if (
+                    old.author.id == self.user.id
+                    and old.embeds
+                    and "Alliance or Horde?" in (old.embeds[0].title or "")
+                ):
+                    alliance, horde = get_counts()
+                    await old.edit(embed=build_embed(alliance, horde), view=PollView())
+                    save_poll_meta(old.id, channel.id)
+                    log.info("Reused existing poll (msg=%s)", old.id)
+                    return
+        except discord.Forbidden:
+            log.warning("Cannot read channel history — will post a new poll")
 
         alliance, horde = get_counts()
         msg = await channel.send(embed=build_embed(alliance, horde), view=PollView())
@@ -229,6 +247,20 @@ async def health_server():
     await site.start()
     log.info("Health server on port %d", port)
 
+async def keep_alive():
+    """Ping our own public URL so Render's free tier doesn't spin the service down."""
+    url = os.getenv("RENDER_EXTERNAL_URL")
+    if not url:
+        return
+    async with aiohttp.ClientSession() as session:
+        while True:
+            await asyncio.sleep(600)
+            try:
+                async with session.get(url.rstrip("/") + "/health", timeout=aiohttp.ClientTimeout(total=15)):
+                    pass
+            except Exception as e:
+                log.warning("Keep-alive ping failed: %s", e)
+
 # ── entry ─────────────────────────────────────────────────────────────────────
 
 async def main():
@@ -236,7 +268,7 @@ async def main():
         raise ValueError("DISCORD_TOKEN is not set")
     bot = PollBot()
     async with bot:
-        await asyncio.gather(bot.start(TOKEN), health_server())
+        await asyncio.gather(bot.start(TOKEN), health_server(), keep_alive())
 
 if __name__ == "__main__":
     asyncio.run(main())
