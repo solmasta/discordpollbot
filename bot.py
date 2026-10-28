@@ -191,6 +191,7 @@ class PollBot(commands.Bot):
                 alliance, horde = get_counts()
                 await msg.edit(embed=build_embed(alliance, horde), view=PollView())
                 log.info("Poll refreshed (msg=%s)", row[0])
+                await self._cleanup_old_polls(channel, row[0])
                 return
             except discord.NotFound:
                 log.warning("Saved poll message missing — looking for existing poll")
@@ -208,6 +209,7 @@ class PollBot(commands.Bot):
                     await old.edit(embed=build_embed(alliance, horde), view=PollView())
                     save_poll_meta(old.id, channel.id)
                     log.info("Reused existing poll (msg=%s)", old.id)
+                    await self._cleanup_old_polls(channel, old.id)
                     return
         except discord.Forbidden:
             log.warning("Cannot read channel history — will post a new poll")
@@ -223,6 +225,22 @@ class PollBot(commands.Bot):
         except Exception as e:
             log.warning("Could not pin poll: %s", e)
         log.info("Poll posted (msg=%s)", msg.id)
+        await self._cleanup_old_polls(channel, msg.id)
+
+    async def _cleanup_old_polls(self, channel, keep_id: int):
+        """Delete the bot's older duplicate poll messages, keeping only keep_id."""
+        try:
+            async for m in channel.history(limit=100):
+                if (
+                    m.id != keep_id
+                    and m.author.id == self.user.id
+                    and m.embeds
+                    and "Alliance or Horde?" in (m.embeds[0].title or "")
+                ):
+                    await m.delete()
+                    log.info("Deleted old poll (msg=%s)", m.id)
+        except (discord.Forbidden, discord.HTTPException) as e:
+            log.warning("Could not clean up old polls: %s", e)
 
     async def on_app_command_error(self, interaction: discord.Interaction, error: Exception):
         msg = f"Error: `{error}`"
