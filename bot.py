@@ -39,6 +39,15 @@ def init_db():
             channel_id INTEGER NOT NULL
         )
     """)
+    # The host's disk is wiped on every restart, so restore the earlier results
+    # (placeholder IDs; usernames kept for reference) whenever the table is empty.
+    if con.execute("SELECT COUNT(*) FROM votes").fetchone()[0] == 0:
+        con.executemany(
+            "INSERT INTO votes (user_id, faction) VALUES (?, ?)",
+            [(-1, "Alliance"),  # miavonni
+             (-2, "Horde"),     # judicial_61512
+             (-3, "Horde")],    # princess_derpy
+        )
     con.commit()
     return con
 
