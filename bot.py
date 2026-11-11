@@ -2,7 +2,6 @@ import os
 import sqlite3
 import asyncio
 import logging
-import aiohttp
 import discord
 from discord.ext import commands
 from aiohttp import web
@@ -19,7 +18,7 @@ GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 POLL_CHANNEL_ID = int(os.getenv("POLL_CHANNEL_ID", "0"))
 DB_PATH = os.getenv("DB_PATH", "/tmp/votes.db")
 
-# ── database ──────────────────────────────────────────────────────────────────
+# ── database ─────────────────────────────────────────────────────────────
 
 def init_db():
     db_dir = os.path.dirname(DB_PATH)
@@ -30,13 +29,6 @@ def init_db():
         CREATE TABLE IF NOT EXISTS votes (
             user_id INTEGER PRIMARY KEY,
             faction TEXT NOT NULL
-        )
-    """)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS poll_meta (
-            id      INTEGER PRIMARY KEY,
-            message_id INTEGER NOT NULL,
-            channel_id INTEGER NOT NULL
         )
     """)
     con.commit()
@@ -62,18 +54,7 @@ def upsert_vote(user_id: int, faction: str) -> str | None:
     db.commit()
     return old
 
-def save_poll_meta(message_id: int, channel_id: int):
-    db.execute(
-        "INSERT OR REPLACE INTO poll_meta (id, message_id, channel_id) VALUES (1, ?, ?)",
-        (message_id, channel_id),
-    )
-    db.commit()
-
-def load_poll_meta():
-    cur = db.execute("SELECT message_id, channel_id FROM poll_meta WHERE id = 1")
-    return cur.fetchone()
-
-# ── embed ─────────────────────────────────────────────────────────────────────
+# ── embed ───────────────────────────────────────────────────────────────────
 
 def build_embed(alliance: int, horde: int) -> discord.Embed:
     total = alliance + horde
@@ -111,7 +92,7 @@ def build_embed(alliance: int, horde: int) -> discord.Embed:
         embed.set_footer(text="No votes yet — be the first!")
     return embed
 
-# ── persistent view ───────────────────────────────────────────────────────────
+# ── persistent view ─────────────────────────────────────────────────────────
 
 class PollView(discord.ui.View):
     def __init__(self):
@@ -125,14 +106,12 @@ class PollView(discord.ui.View):
             )
             return
         alliance, horde = get_counts()
-        # Acknowledge within Discord's 3s window by editing the poll message
-        # via the interaction itself (no channel permissions needed).
-        await interaction.response.edit_message(embed=build_embed(alliance, horde), view=self)
+        await interaction.message.edit(embed=build_embed(alliance, horde), view=self)
         if result is None:
             reply = f"You voted **{faction}**! ✅"
         else:
             reply = f"Switched from **{result}** → **{faction}**! ✅"
-        await interaction.followup.send(reply, ephemeral=True)
+        await interaction.response.send_message(reply, ephemeral=True)
         log.info("Vote: %s → %s (A=%d H=%d)", interaction.user, faction, alliance, horde)
 
     @discord.ui.button(
@@ -151,14 +130,13 @@ class PollView(discord.ui.View):
     async def btn_horde(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._vote(interaction, "Horde")
 
-# ── bot ───────────────────────────────────────────────────────────────────────
+# ── bot ────────────────────────────────────────────────────────────────────
 
 class PollBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
+        intents.message_content = False
         super().__init__(command_prefix="!", intents=intents)
-
-    async def setup_hook(self):
         self.add_view(PollView())
 
     async def on_ready(self):
@@ -174,67 +152,31 @@ class PollBot(commands.Bot):
     async def _ensure_poll(self):
         try:
             channel = await self.fetch_channel(POLL_CHANNEL_ID)
-        except discord.NotFound:
-            log.error("Channel %s not found", POLL_CHANNEL_ID)
-            return
-        except discord.Forbidden:
-            log.error("No permission to access channel %s", POLL_CHANNEL_ID)
-            return
         except Exception as e:
             log.error("Could not fetch channel: %s", e)
             return
 
-        row = load_poll_meta()
-        if row:
-            try:
-                msg = await channel.fetch_message(row[0])
-                alliance, horde = get_counts()
-                await msg.edit(embed=build_embed(alliance, horde), view=PollView())
-                log.info("Poll refreshed (msg=%s)", row[0])
-                return
-            except discord.NotFound:
-                log.warning("Saved poll message missing — looking for existing poll")
-
-        # Database may have been wiped (e.g. ephemeral disk) — reuse the bot's
-        # existing poll message instead of posting a duplicate.
-        try:
-            async for old in channel.history(limit=50):
-                if (
-                    old.author.id == self.user.id
-                    and old.embeds
-                    and "Alliance or Horde?" in (old.embeds[0].title or "")
-                ):
-                    alliance, horde = get_counts()
-                    await old.edit(embed=build_embed(alliance, horde), view=PollView())
-                    save_poll_meta(old.id, channel.id)
-                    log.info("Reused existing poll (msg=%s)", old.id)
-                    return
-        except discord.Forbidden:
-            log.warning("Cannot read channel history — will post a new poll")
+        # scan last 50 messages for an existing poll from this bot
+        existing = None
+        async for msg in channel.history(limit=50):
+            if msg.author.id == self.user.id and msg.embeds:
+                existing = msg
+                break
 
         alliance, horde = get_counts()
-        msg = await channel.send(embed=build_embed(alliance, horde), view=PollView())
-        save_poll_meta(msg.id, channel.id)
-        try:
-            await msg.pin()
-            log.info("Poll pinned (msg=%s)", msg.id)
-        except discord.Forbidden:
-            log.warning("Missing Manage Messages permission — poll not pinned")
-        except Exception as e:
-            log.warning("Could not pin poll: %s", e)
-        log.info("Poll posted (msg=%s)", msg.id)
 
-    async def on_app_command_error(self, interaction: discord.Interaction, error: Exception):
-        msg = f"Error: `{error}`"
-        try:
-            if interaction.response.is_done():
-                await interaction.followup.send(msg, ephemeral=True)
-            else:
-                await interaction.response.send_message(msg, ephemeral=True)
-        except Exception:
-            pass
+        if existing:
+            await existing.edit(embed=build_embed(alliance, horde), view=PollView())
+            log.info("Poll refreshed (msg=%s)", existing.id)
+        else:
+            msg = await channel.send(embed=build_embed(alliance, horde), view=PollView())
+            try:
+                await msg.pin()
+            except discord.Forbidden:
+                log.warning("Missing Manage Messages — poll not pinned")
+            log.info("Poll posted (msg=%s)", msg.id)
 
-# ── health server ─────────────────────────────────────────────────────────────
+# ── health server ───────────────────────────────────────────────────────────
 
 async def health_server():
     app = web.Application()
@@ -247,28 +189,14 @@ async def health_server():
     await site.start()
     log.info("Health server on port %d", port)
 
-async def keep_alive():
-    """Ping our own public URL so Render's free tier doesn't spin the service down."""
-    url = os.getenv("RENDER_EXTERNAL_URL")
-    if not url:
-        return
-    async with aiohttp.ClientSession() as session:
-        while True:
-            await asyncio.sleep(600)
-            try:
-                async with session.get(url.rstrip("/") + "/health", timeout=aiohttp.ClientTimeout(total=15)):
-                    pass
-            except Exception as e:
-                log.warning("Keep-alive ping failed: %s", e)
-
-# ── entry ─────────────────────────────────────────────────────────────────────
+# ── entry ───────────────────────────────────────────────────────────────────
 
 async def main():
     if not TOKEN:
         raise ValueError("DISCORD_TOKEN is not set")
     bot = PollBot()
     async with bot:
-        await asyncio.gather(bot.start(TOKEN), health_server(), keep_alive())
+        await asyncio.gather(bot.start(TOKEN), health_server())
 
 if __name__ == "__main__":
     asyncio.run(main())
